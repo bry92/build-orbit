@@ -25,6 +25,15 @@
 const fs = require('fs');
 const path = require('path');
 
+function resolveInside(basePath, ...segments) {
+  const base = path.resolve(basePath);
+  const target = path.resolve(base, ...segments);
+  if (target !== base && !target.startsWith(base + path.sep)) {
+    throw new Error('Path escapes artifact storage root');
+  }
+  return target;
+}
+
 // ── Stage → artifact filename mapping ──────────────────────
 const STAGE_FILENAMES = {
   plan: 'plan.json',
@@ -40,9 +49,9 @@ class ArtifactStore {
    * @param {string} [basePath='./artifacts'] - Root directory for artifact storage
    */
   constructor(basePath = './artifacts') {
-    this.basePath = basePath;
-    fs.mkdirSync(basePath, { recursive: true });
-    console.log(`[ArtifactStore] Initialized at: ${basePath}`);
+    this.basePath = path.resolve(basePath);
+    fs.mkdirSync(this.basePath, { recursive: true });
+    console.log(`[ArtifactStore] Initialized at: ${this.basePath}`);
   }
 
   /**
@@ -56,10 +65,10 @@ class ArtifactStore {
    * @returns {{ written?: boolean, skipped?: boolean, path: string, size?: number }}
    */
   async writeArtifact(runId, stage, filename, data) {
-    const dir = path.join(this.basePath, runId, stage);
+    const dir = resolveInside(this.basePath, runId, stage);
     fs.mkdirSync(dir, { recursive: true });
 
-    const filePath = path.join(dir, filename);
+    const filePath = resolveInside(dir, filename);
 
     // Immutability: never overwrite
     if (fs.existsSync(filePath)) {
@@ -99,10 +108,10 @@ class ArtifactStore {
    * @returns {{ updated: boolean, path: string, size: number }}
    */
   async updateArtifact(runId, stage, filename, data) {
-    const dir = path.join(this.basePath, runId, stage);
+    const dir = resolveInside(this.basePath, runId, stage);
     fs.mkdirSync(dir, { recursive: true });
 
-    const filePath = path.join(dir, filename);
+    const filePath = resolveInside(dir, filename);
     const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
     fs.writeFileSync(filePath, content, 'utf8');
 
@@ -134,7 +143,7 @@ class ArtifactStore {
    * @returns {*} Parsed content or null if not found
    */
   async readArtifact(runId, stage, filename) {
-    const filePath = path.join(this.basePath, runId, stage, filename);
+    const filePath = resolveInside(this.basePath, runId, stage, filename);
     if (!fs.existsSync(filePath)) return null;
 
     const content = fs.readFileSync(filePath, 'utf8');
@@ -156,11 +165,11 @@ class ArtifactStore {
     const results = [];
 
     if (stage) {
-      const dir = path.join(this.basePath, runId, stage);
+      const dir = resolveInside(this.basePath, runId, stage);
       if (!fs.existsSync(dir)) return [];
 
       for (const filename of fs.readdirSync(dir)) {
-        const filePath = path.join(dir, filename);
+        const filePath = resolveInside(dir, filename);
         const stat = fs.statSync(filePath);
         results.push({
           runId,
@@ -172,7 +181,7 @@ class ArtifactStore {
         });
       }
     } else {
-      const runDir = path.join(this.basePath, runId);
+      const runDir = resolveInside(this.basePath, runId);
       if (!fs.existsSync(runDir)) return [];
 
       for (const s of fs.readdirSync(runDir)) {
@@ -180,7 +189,7 @@ class ArtifactStore {
         if (!fs.statSync(stageDir).isDirectory()) continue;
 
         for (const filename of fs.readdirSync(stageDir)) {
-          const filePath = path.join(stageDir, filename);
+          const filePath = resolveInside(stageDir, filename);
           const stat = fs.statSync(filePath);
           results.push({
             runId,
@@ -264,7 +273,7 @@ class ArtifactStore {
    * @returns {boolean}
    */
   hasArtifacts(runId) {
-    return fs.existsSync(path.join(this.basePath, runId));
+    return fs.existsSync(resolveInside(this.basePath, runId));
   }
 }
 

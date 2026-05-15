@@ -65,6 +65,23 @@ const {
 const app = express();
 const port = process.env.PORT || 3000;
 
+function getSigningSecret() {
+  const secret = process.env.JWT_SECRET || process.env.POLSIA_API_KEY;
+  if (!secret && process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET or POLSIA_API_KEY is required in production');
+  }
+  return secret || 'buildorbit-dev-secret';
+}
+
+function resolveInside(basePath, relativePath) {
+  const base = path.resolve(basePath);
+  const target = path.resolve(base, String(relativePath || '').replace(/^[/\\]+/, ''));
+  if (target !== base && !target.startsWith(base + path.sep)) {
+    throw new Error('Path escapes expected directory');
+  }
+  return target;
+}
+
 // Fail fast if DATABASE_URL is missing
 if (!process.env.DATABASE_URL) {
   console.error('ERROR: DATABASE_URL environment variable is required');
@@ -230,7 +247,7 @@ app.post('/api/auth/magic-link', async (req, res) => {
       }
       // Validate HMAC-signed expected answer
       const [encodedAnswer, sig] = challenge_expected.split('.');
-      const hmac = crypto.createHmac('sha256', process.env.JWT_SECRET || 'REDACTED')
+      const hmac = crypto.createHmac('sha256', getSigningSecret())
         .update(encodedAnswer).digest('hex');
       const expectedAnswer = Buffer.from(encodedAnswer, 'base64').toString();
       if (sig !== hmac || String(challenge_answer).trim() !== expectedAnswer) {
@@ -435,7 +452,7 @@ app.get('/api/auth/challenge', (req, res) => {
   const b = Math.floor(Math.random() * 10) + 1;
   const answer = String(a + b);
   const encoded = Buffer.from(answer).toString('base64');
-  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET || 'REDACTED')
+  const sig = crypto.createHmac('sha256', getSigningSecret())
     .update(encoded).digest('hex');
 
   res.json({
@@ -711,7 +728,7 @@ app.post('/auth/set-password', auth.requireApiAuth, async (req, res) => {
   const { password } = req.body || {};
 
   // Minimum 8 characters — bcrypt truncates input at 72 bytes, so no arbitrary max
-  if (!password || typeof password !== 'REDACTED' || password.length < 8) {
+  if (!password || typeof password !== 'string' || password.length < 8) {
     return res.status(400).json({
       success: false,
       message: 'Password must be at least 8 characters.'
@@ -854,7 +871,7 @@ app.post(['/auth/signup', '/api/auth/register'], async (req, res) => {
     return res.status(400).json({ success: false, message: 'A valid email address is required.' });
   }
 
-  if (!password || typeof password !== 'REDACTED' || password.length < 8) {
+  if (!password || typeof password !== 'string' || password.length < 8) {
     return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
   }
 
@@ -1011,7 +1028,7 @@ app.post(['/auth/reset-password', '/api/auth/reset-password'], async (req, res) 
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ success: false, message: 'Reset token is required.' });
   }
-  if (!password || typeof password !== 'REDACTED' || password.length < 8) {
+  if (!password || typeof password !== 'string' || password.length < 8) {
     return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
   }
 
@@ -3006,7 +3023,7 @@ app.post('/api/pipeline/:runId/code-files/save', async (req, res) => {
     }
 
     // Sanitize path — block directory traversal
-    const safeFilePath = filePath.replace(/\.\./g, '').replace(/^\/+/, '');
+    const safeFilePath = filePath.replace(/^[/\\]+/, '');
 
     const userId = req.user?.userId || null;
     const ownerCheck = await pipeline.getRun(runId, userId);
@@ -3015,7 +3032,8 @@ app.post('/api/pipeline/:runId/code-files/save', async (req, res) => {
     }
 
     // Write to deployed/current/ directory to update live preview
-    const deployedPath = path.join(DEPLOY_BASE, runId, 'current', safeFilePath);
+    const deployedBase = path.join(DEPLOY_BASE, runId, 'current');
+    const deployedPath = resolveInside(deployedBase, safeFilePath);
     if (fs.existsSync(path.dirname(deployedPath))) {
       fs.mkdirSync(path.dirname(deployedPath), { recursive: true });
       fs.writeFileSync(deployedPath, content, 'utf8');

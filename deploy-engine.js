@@ -31,6 +31,15 @@ const DEPLOY_BASE = path.join(__dirname, 'deployed');
 const PREVIEW_BASE = path.join(__dirname, 'preview');
 const APPS_BASE = path.join(__dirname, 'apps');
 
+function resolveInside(basePath, ...segments) {
+  const base = path.resolve(basePath);
+  const target = path.resolve(base, ...segments);
+  if (target !== base && !target.startsWith(base + path.sep)) {
+    throw new Error('Path escapes deployment directory');
+  }
+  return target;
+}
+
 class DeployEngine {
   /**
    * @param {import('pg').Pool} pool
@@ -95,7 +104,7 @@ class DeployEngine {
           let fileCount = 0;
           for (const [filename, content] of Object.entries(code.files)) {
             if (typeof content !== 'string') continue;
-            const filePath = path.join(versionDir, filename);
+            const filePath = resolveInside(versionDir, filename);
             fs.mkdirSync(path.dirname(filePath), { recursive: true });
             fs.writeFileSync(filePath, content, 'utf8');
             fileCount++;
@@ -106,13 +115,13 @@ class DeployEngine {
             const htmlFile = Object.keys(code.files).find(f => f.endsWith('.html'));
             if (htmlFile) {
               fs.copyFileSync(
-                path.join(versionDir, htmlFile),
-                path.join(versionDir, 'index.html')
+                resolveInside(versionDir, htmlFile),
+                resolveInside(versionDir, 'index.html')
               );
             } else {
               const entryPoint = code.entryPoint || Object.keys(code.files)[0] || 'app.js';
               fs.writeFileSync(
-                path.join(versionDir, 'index.html'),
+                resolveInside(versionDir, 'index.html'),
                 this._generateIndexHtml(row.prompt, entryPoint, code.files),
                 'utf8'
               );
@@ -208,7 +217,7 @@ class DeployEngine {
       let fileCount = 0;
       for (const [filename, content] of Object.entries(files)) {
         if (typeof content !== 'string') continue;
-        const filePath = path.join(versionDir, filename);
+        const filePath = resolveInside(versionDir, filename);
         const fileDir = path.dirname(filePath);
         fs.mkdirSync(fileDir, { recursive: true });
         fs.writeFileSync(filePath, content, 'utf8');
@@ -220,14 +229,14 @@ class DeployEngine {
         const htmlFile = Object.keys(files).find(f => f.endsWith('.html'));
         if (htmlFile) {
           fs.copyFileSync(
-            path.join(versionDir, htmlFile),
-            path.join(versionDir, 'index.html')
+            resolveInside(versionDir, htmlFile),
+            resolveInside(versionDir, 'index.html')
           );
         } else {
           // Generate a minimal index.html wrapper
           const entryPoint = code.entryPoint || Object.keys(files)[0] || 'app.js';
           fs.writeFileSync(
-            path.join(versionDir, 'index.html'),
+            resolveInside(versionDir, 'index.html'),
             this._generateIndexHtml(prompt, entryPoint, files),
             'utf8'
           );
@@ -416,7 +425,7 @@ class DeployEngine {
       let fileCount = 0;
       for (const [filename, content] of Object.entries(files)) {
         if (typeof content !== 'string') continue;
-        const filePath = path.join(versionDir, filename);
+        const filePath = resolveInside(versionDir, filename);
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         fs.writeFileSync(filePath, content, 'utf8');
         fileCount++;
@@ -438,7 +447,7 @@ class DeployEngine {
             bcrypt: '^5.1.1',
           },
         }, null, 2);
-        fs.writeFileSync(path.join(versionDir, 'package.json'), defaultPkg, 'utf8');
+        fs.writeFileSync(resolveInside(versionDir, 'package.json'), defaultPkg, 'utf8');
         fileCount++;
       }
 
@@ -734,7 +743,7 @@ ${jsScripts}
       // Write all files
       for (const [filename, content] of Object.entries(files)) {
         if (typeof content !== 'string') continue;
-        const filePath = path.join(previewDir, filename);
+        const filePath = resolveInside(previewDir, filename);
         const fileDir = path.dirname(filePath);
         fs.mkdirSync(fileDir, { recursive: true });
         fs.writeFileSync(filePath, content, 'utf8');
@@ -744,11 +753,11 @@ ${jsScripts}
       if (!files['index.html']) {
         const htmlFile = Object.keys(files).find(f => f.endsWith('.html'));
         if (htmlFile) {
-          fs.copyFileSync(path.join(previewDir, htmlFile), path.join(previewDir, 'index.html'));
+          fs.copyFileSync(resolveInside(previewDir, htmlFile), resolveInside(previewDir, 'index.html'));
         } else {
           const entryPoint = codeArtifact.entryPoint || Object.keys(files)[0] || 'app.js';
           fs.writeFileSync(
-            path.join(previewDir, 'index.html'),
+            resolveInside(previewDir, 'index.html'),
             this._generateIndexHtml(prompt, entryPoint, files),
             'utf8'
           );

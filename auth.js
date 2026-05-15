@@ -23,11 +23,18 @@ const https = require('https');
 // Layer 5: External Effect Verifier — email boundary health events
 const { emitProviderEvent, PROVIDER_EVENT_TYPES } = require('./backend/src/email/provider-events');
 
-// Derive a stable secret if JWT_SECRET is not explicitly set
-const JWT_SECRET = process.env.JWT_SECRET ||
-  crypto.createHash('sha256')
-    .update(process.env.POLSIA_API_KEY || 'REDACTED')
-    .digest('hex');
+function getJwtSecret() {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  if (process.env.POLSIA_API_KEY) {
+    return crypto.createHash('sha256').update(process.env.POLSIA_API_KEY).digest('hex');
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET or POLSIA_API_KEY is required in production');
+  }
+  return crypto.createHash('sha256').update('buildorbit-dev-secret').digest('hex');
+}
+
+const JWT_SECRET = getJwtSecret();
 
 const COOKIE_NAME = 'bo_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
