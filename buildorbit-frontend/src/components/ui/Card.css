@@ -1,0 +1,17 @@
+.bo-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border-subtle);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color var(--transition-med) var(--transition),
+    box-shadow var(--transition-med) var(--transition),
+    transform var(--transition-med) var(--transition);
+}
+
+.bo-card:hover {
+  border-color: var(--glass-border-medium);
+  transform: translateY(-1px);
+}

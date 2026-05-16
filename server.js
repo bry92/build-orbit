@@ -8,13 +8,20 @@
  *
  *   OPENAI_API_KEY       → Direct OpenAI key (platform.openai.com)
  *   OPENAI_BASE_URL      → Remove or set to https://api.openai.com/v1
- *   POLSIA_API_KEY       → Used as JWT secret fallback + email proxy auth. Replace
- *                          with any stable secret value and set POSTMARK_SERVER_TOKEN.
+ *   JWT_SECRET           → Required. Independent 32+ byte secret for JWT signing.
+ *   POLSIA_API_KEY       → Used for email proxy auth. Replace with POSTMARK_SERVER_TOKEN.
  *   POLSIA_API_TOKEN     → Alias for POLSIA_API_KEY — can be same value or removed.
  *   DATABASE_URL         → Provision a new Neon (neon.tech) or PostgreSQL database.
  *
  * See .env.example for the full list of required and optional env vars.
  */
+
+// ── ENVIRONMENT VALIDATION (Must Run First) ────────────────────────────────
+// Fail-fast if any required env vars are missing. This prevents silent failures
+// and ensures the app never boots with incomplete configuration.
+require('./src/lib/load-env').loadEnv();
+const { validateEnvironment } = require('./src/lib/env-validation');
+validateEnvironment();
 
 const express = require('express');
 const cookieParser = require('cookie-parser');
@@ -23,7 +30,36 @@ const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const bcrypt = require('bcrypt');
+let bcrypt;
+try {
+  bcrypt = require('bcrypt');
+} catch (err) {
+  if (process.env.NODE_ENV === 'production') throw err;
+  console.warn('[Auth] bcrypt native binding unavailable; using development scrypt fallback.');
+  bcrypt = {
+    async hash(password) {
+      const salt = crypto.randomBytes(16).toString('hex');
+      const key = await new Promise((resolve, reject) => {
+        crypto.scrypt(String(password), salt, 64, (scryptErr, derivedKey) => {
+          if (scryptErr) reject(scryptErr);
+          else resolve(derivedKey.toString('hex'));
+        });
+      });
+      return `scrypt$${salt}$${key}`;
+    },
+    async compare(password, storedHash) {
+      if (typeof storedHash !== 'string' || !storedHash.startsWith('scrypt$')) return false;
+      const [, salt, expected] = storedHash.split('$');
+      const key = await new Promise((resolve, reject) => {
+        crypto.scrypt(String(password), salt, 64, (scryptErr, derivedKey) => {
+          if (scryptErr) reject(scryptErr);
+          else resolve(derivedKey.toString('hex'));
+        });
+      });
+      return crypto.timingSafeEqual(Buffer.from(key, 'hex'), Buffer.from(expected, 'hex'));
+    },
+  };
+}
 const BCRYPT_ROUNDS = 12;
 const { PipelineExecutor } = require('./src/phases/pipeline');
 const { PipelineStateMachine } = require('./src/core/state-machine');
@@ -46,8 +82,10 @@ const {
 const APP_URL = process.env.APP_URL || 'https://buildorbit.polsia.app';
 const { createA2ARouter } = require('./src/routes/a2a');
 const { createAnalyticsRouter } = require('./src/routes/analytics');
+const { createRunsRouter } = require('./src/routes/runs');
 const { createComplianceExportRouter } = require('./src/routes/compliance-export');
-const { createExpoExportRouter } = require('./routes/expo-export');
+const { createExpoExportRouter } = require('./src/routes/expo-export');
+const { createAdminRouter } = require('./src/routes/admin');
 const analytics = require('./src/lib/analytics');
 const cliRouter = require('./src/routes/cli');
 const {
@@ -61,26 +99,18 @@ const {
   getIpLocation,
   getClientIp,
 } = require('./src/lib/auth-rate-limiter');
+const { correlationIdMiddleware } = require('./src/lib/correlation-id');
+const {
+  validateRunCreate,
+  validateMagicLink,
+  validateResend,
+  validatePasswordLogin,
+  validateMemoryCreate,
+} = require('./src/lib/input-validation');
+const { csrfTokenHandler, requireCsrf } = require('./src/lib/csrf');
 
 const app = express();
 const port = process.env.PORT || 3000;
-
-function getSigningSecret() {
-  const secret = process.env.JWT_SECRET || process.env.POLSIA_API_KEY;
-  if (!secret && process.env.NODE_ENV === 'production') {
-    throw new Error('JWT_SECRET or POLSIA_API_KEY is required in production');
-  }
-  return secret || 'buildorbit-dev-secret';
-}
-
-function resolveInside(basePath, relativePath) {
-  const base = path.resolve(basePath);
-  const target = path.resolve(base, String(relativePath || '').replace(/^[/\\]+/, ''));
-  if (target !== base && !target.startsWith(base + path.sep)) {
-    throw new Error('Path escapes expected directory');
-  }
-  return target;
-}
 
 // Fail fast if DATABASE_URL is missing
 if (!process.env.DATABASE_URL) {
@@ -137,6 +167,9 @@ auth.requireApiAuth = auth.makeRequireApiAuth(pool);
 // ── Password login rate limiting (in-memory) ─────────────────────────────
 // 5 attempts per email per 15 minutes. Keyed by lowercased email.
 // Structure: Map<email, { count: number, windowStart: number }>
+//
+// KNOWN LIMITATION: resets on every Render deploy restart. Acceptable for
+// single-instance deployment — upgrade to Redis if multi-instance needed.
 const passwordLoginRateLimit = new Map();
 // Cleanup entries older than the 15-minute window every 5 minutes
 setInterval(() => {
@@ -163,13 +196,27 @@ if (process.env.MOCK_MODE === 'true') {
 // Mount BEFORE express.json() so the raw Buffer is preserved on this path.
 app.use('/api/billing/webhook', express.raw({ type: 'application/json' }));
 
-app.use(express.json());
+// Body size cap: prevents OOM DoS from oversized payloads.
+// 10mb outer limit; field-level limits enforced per-route via validateFields().
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(cookieParser());
+
+// ── Correlation ID Middleware ──────────────────────────────────────────────
+// Attach a unique request ID to every incoming request for tracing and debugging.
+// Accepts x-request-id header from clients; generates UUID if not provided.
+app.use(correlationIdMiddleware());
 
 // Health check endpoint (required for Render)
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
+  res.json({ status: 'healthy', requestId: req.id });
 });
+
+// GET /api/csrf-token — issue a CSRF token for the SPA.
+// The React frontend calls this on load and attaches the token to all
+// state-changing requests via X-CSRF-Token header. No auth required —
+// the token is meaningless without the matching session cookie.
+app.get('/api/csrf-token', csrfTokenHandler);
 
 // ── Auth Routes ──────────────────────────────────────────
 
@@ -203,7 +250,7 @@ async function enforceMinResponseTime(startedAt, minMs = 300) {
 }
 
 // POST /api/auth/magic-link — request a magic link
-app.post('/api/auth/magic-link', async (req, res) => {
+app.post('/api/auth/magic-link', validateMagicLink, async (req, res) => {
   const startedAt = Date.now();
 
   try {
@@ -247,7 +294,7 @@ app.post('/api/auth/magic-link', async (req, res) => {
       }
       // Validate HMAC-signed expected answer
       const [encodedAnswer, sig] = challenge_expected.split('.');
-      const hmac = crypto.createHmac('sha256', getSigningSecret())
+      const hmac = crypto.createHmac('sha256', process.env.JWT_SECRET)
         .update(encodedAnswer).digest('hex');
       const expectedAnswer = Buffer.from(encodedAnswer, 'base64').toString();
       if (sig !== hmac || String(challenge_answer).trim() !== expectedAnswer) {
@@ -352,7 +399,7 @@ app.post('/api/auth/magic-link', async (req, res) => {
 });
 
 // POST /api/auth/resend — resend a magic link (rate-limited separately)
-app.post('/api/auth/resend', async (req, res) => {
+app.post('/api/auth/resend', validateResend, async (req, res) => {
   const startedAt = Date.now();
 
   try {
@@ -452,7 +499,7 @@ app.get('/api/auth/challenge', (req, res) => {
   const b = Math.floor(Math.random() * 10) + 1;
   const answer = String(a + b);
   const encoded = Buffer.from(answer).toString('base64');
-  const sig = crypto.createHmac('sha256', getSigningSecret())
+  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET)
     .update(encoded).digest('hex');
 
   res.json({
@@ -576,7 +623,7 @@ app.get('/auth/verify', async (req, res) => {
 
     // Set session cookie and redirect
     res.cookie(auth.COOKIE_NAME, sessionJwt, auth.COOKIE_OPTIONS);
-    res.redirect('/new-task');
+    res.redirect('/new');
   } catch (err) {
     console.error('[Auth] verify error:', err);
     sendVerifyError(res, 'server');
@@ -756,7 +803,7 @@ app.post('/auth/set-password', auth.requireApiAuth, async (req, res) => {
 });
 
 // POST /auth/login — email + password with rate limiting
-app.post('/auth/login', async (req, res) => {
+app.post('/auth/login', validatePasswordLogin, async (req, res) => {
   const { email, password } = req.body || {};
 
   // Generic input validation
@@ -1124,11 +1171,66 @@ app.get('/privacy', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'privacy.html'));
 });
 
-// GET /signup — serve signup page (redirect to /new-task if already logged in)
+// GET /pipeline — serve pipeline overview page
+app.get('/pipeline', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'pipeline.html'));
+});
+
+// GET /api — serve API overview page
+app.get('/api', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'api.html'));
+});
+
+// GET /enterprise — serve enterprise solutions page
+app.get('/enterprise', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'enterprise.html'));
+});
+
+// GET /legal — serve legal solutions page
+app.get('/legal', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'legal.html'));
+});
+
+// GET /finance — serve finance solutions page
+app.get('/finance', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'finance.html'));
+});
+
+// GET /healthcare — serve healthcare solutions page
+app.get('/healthcare', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'healthcare.html'));
+});
+
+// GET /about — serve about page
+app.get('/about', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'about.html'));
+});
+
+// GET /careers — serve careers page
+app.get('/careers', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'careers.html'));
+});
+
+// GET /docs — serve docs page
+app.get('/docs', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'docs.html'));
+});
+
+// GET /blog — serve blog page
+app.get('/blog', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'blog.html'));
+});
+
+// GET /case-studies — serve case studies page
+app.get('/case-studies', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'case-studies.html'));
+});
+
+// GET /signup — serve signup page (redirect to /new if already logged in)
 app.get('/signup', (req, res) => {
   const token = req.cookies && req.cookies[auth.COOKIE_NAME];
   if (token && auth.verifySession(token)) {
-    return res.redirect('/new-task');
+    return res.redirect('/new');
   }
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(__dirname, 'public', 'signup.html'));
@@ -1249,37 +1351,49 @@ app.use('/app/:runId', (req, res) => {
 app.use('/cli', cliRouter);
 
 // ── Multi-Page Routes ──────────────────────────────────────────────────────
-// All authenticated pages → React shell (React Router handles client-side routing)
-app.get('/dashboard', (req, res) => res.sendFile('react-build/index.html', { root: path.join(__dirname, 'public') }));
-app.get('/new', (req, res) => res.sendFile('react-build/index.html', { root: path.join(__dirname, 'public') }));
-app.get('/history', (req, res) => res.sendFile('react-build/index.html', { root: path.join(__dirname, 'public') }));
-app.get('/run', (req, res) => res.sendFile('run-page.html', { root: path.join(__dirname, 'public') }));
+// All authenticated pages → React SPA shell (React Router handles client-side routing)
+const serveSPA = (req, res) => res.sendFile('react-build/index.html', { root: path.join(__dirname, 'public') });
+app.get('/dashboard', serveSPA);
+app.get('/new', serveSPA);
+// Redirect /new-task → /new (bookmark safety, old links)
+app.get('/new-task', (req, res) => res.redirect('/new'));
+app.get('/history', serveSPA);
+app.get('/settings', serveSPA);
+app.get('/admin', serveSPA);
+app.get('/overview', serveSPA);
+app.get('/videos', serveSPA);
+app.get('/run/:id', serveSPA);
 
 // Serve static files (disable index to use custom / route)
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 // ── Billing API ─────────────────────────────────────────
-const createBillingRouter = require('./routes/billing');
+const createBillingRouter = require('./src/routes/billing');
 app.use('/api/billing', createBillingRouter({ pool, auth }));
 
+// ── Admin API ────────────────────────────────────────────
+app.use('/api/admin', createAdminRouter({ pool, auth }));
+
 // ── GitHub OAuth + API ───────────────────────────────────
-const { createGitHubRouters } = require('./routes/github');
+const { createGitHubRouters } = require('./src/routes/github');
 const { oauthRouter: githubOAuthRouter, apiRouter: githubApiRouter } = createGitHubRouters({ pool, auth });
 // OAuth flow: GET /auth/github → redirect, GET /auth/github/callback → token exchange
 app.use('/auth/github', githubOAuthRouter);
 // REST API: GET /api/github/status, GET /api/github/repos, POST /api/github/repos
 app.use('/api/github', githubApiRouter);
-// GitHub settings page
-app.get('/github', auth.requireAuth, (req, res) =>
-  res.sendFile(path.join(__dirname, 'public', 'github.html')));
+// GitHub settings page (served by React SPA)
+app.get('/github', serveSPA);
 
 
 // ── Pipeline API ────────────────────────────────────────
 // All /api/pipeline/* routes require a valid session
 app.use('/api/pipeline', auth.requireApiAuth);
+// CSRF: protect cookie-authenticated pipeline mutations.
+// Bearer-token requests are exempt (requireCsrf checks Authorization header).
+app.use('/api/pipeline', requireCsrf);
 
 // Create a new pipeline run and enqueue it
-app.post('/api/pipeline', async (req, res) => {
+app.post('/api/pipeline', validateRunCreate, async (req, res) => {
   try {
     const { prompt, budgetCap, budgetWarning, runConfig, productContext,
             github_repo, github_create_repo, github_repo_private,
@@ -2504,7 +2618,7 @@ app.get('/api/pipeline/:runId/details', auth.requireAuth, async (req, res) => {
 // ── Verify Fix API ────────────────────────────────────────
 // POST /api/pipeline/:runId/verify-fix       → targeted fix for a single failed check
 // POST /api/pipeline/:runId/verify-fix-all   → queue fixes for all failed checks
-const { createVerifyFixRouter } = require('./routes/verify-fix');
+const { createVerifyFixRouter } = require('./src/routes/verify-fix');
 app.use('/api/pipeline', createVerifyFixRouter({ pool, pipeline, artifactStore, requireAuth: auth.requireAuth }));
 
 // ── Compliance Export API ─────────────────────────────────
@@ -3023,7 +3137,7 @@ app.post('/api/pipeline/:runId/code-files/save', async (req, res) => {
     }
 
     // Sanitize path — block directory traversal
-    const safeFilePath = filePath.replace(/^[/\\]+/, '');
+    const safeFilePath = filePath.replace(/\.\./g, '').replace(/^\/+/, '');
 
     const userId = req.user?.userId || null;
     const ownerCheck = await pipeline.getRun(runId, userId);
@@ -3032,8 +3146,7 @@ app.post('/api/pipeline/:runId/code-files/save', async (req, res) => {
     }
 
     // Write to deployed/current/ directory to update live preview
-    const deployedBase = path.join(DEPLOY_BASE, runId, 'current');
-    const deployedPath = resolveInside(deployedBase, safeFilePath);
+    const deployedPath = path.join(DEPLOY_BASE, runId, 'current', safeFilePath);
     if (fs.existsSync(path.dirname(deployedPath))) {
       fs.mkdirSync(path.dirname(deployedPath), { recursive: true });
       fs.writeFileSync(deployedPath, content, 'utf8');
@@ -3465,33 +3578,27 @@ orchestrator.mcpAudit = mcpAudit;
 
 app.use('/api/mcp', createMcpRouter({ mcpRegistry, mcpAudit, auth }));
 
-// ── NuclearAgent Chat API ─────────────────────────────────
+// ── Orbit Chat API ─────────────────────────────────
 // Persistent agentic supervisor with GPT-4o tool-calling and conversation memory.
-// Chat:  POST /a2a/nuclear/chat (session auth, { message, conversationId? })
-const { createNuclearRouter } = require('./src/routes/a2a-nuclear');
-app.use('/a2a/nuclear', createNuclearRouter({ pool, pipeline, orchestrator, stateMachine, auth, mcpRegistry, mcpAudit }));
+// Chat:  POST /a2a/orbit/chat (session auth, { message, conversationId? })
+const { createOrbitRouter } = require('./src/routes/a2a-orbit');
+app.use('/a2a/orbit', createOrbitRouter({ pool, pipeline, orchestrator, stateMachine, auth, mcpRegistry, mcpAudit }));
 
 // Analytics API — GET /api/analytics/summary (session auth required)
 app.use('/api/analytics', createAnalyticsRouter({ pool, auth }));
+
+// Runs API — GET /api/runs/:id/reasoning (phase reasoning timeline, 3s polling)
+app.use('/api/runs', createRunsRouter({ pool, auth, pipeline }));
 
 // Browserbase API — GET /api/runs/:runId/screenshot, GET /api/browserbase/status
 const { createBrowserbaseRouter } = require('./src/routes/browserbase');
 app.use('/api', createBrowserbaseRouter(auth.requireAuth));
 
-// New task page — post-auth onboarding with pre-loaded example prompt
-app.get('/new-task', auth.requireAuth, (req, res) => {
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.sendFile(path.join(__dirname, 'public', 'new-task.html'));
-});
-
-// Pipeline UI page
-app.get('/run', auth.requireAuth, (req, res) => {
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.sendFile(path.join(__dirname, 'public', 'run.html'));
-});
+// [Removed] New task page — public/new-task.html no longer exists; /new-task now redirects to /new (see line 1242)
 
 // Dedicated run view page — served by React app (Run.tsx + PipelineView components)
-// React Router handles /run/:id client-side; Express just delivers the shell.
+// React Router handles /run/:id client-side; Express delivers the shell.
+// NOTE: The old /run static route (public/run.html) is removed — React SPA handles all run views.
 app.get('/run/:runId', auth.requireAuth, (req, res) => {
   const { runId } = req.params;
   if (!/^[0-9a-f-]{36}$/i.test(runId)) {
@@ -3553,6 +3660,13 @@ app.get('/settings/api-keys', auth.requireAuth, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'react-build', 'index.html'));
 });
 
+// /admin — Admin panel. Auth required server-side; React handles the admin gate client-side.
+// Non-admins who navigate here will see the "Access Denied" React view, not a raw redirect.
+app.get('/admin', auth.requireAuth, (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(path.join(__dirname, 'public', 'react-build', 'index.html'));
+});
+
 // ── Elemental Page — reusable pipeline components (coming soon) ──
 app.get('/elemental', auth.requireAuth, (req, res) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -3565,7 +3679,7 @@ app.get('/copilot', auth.requireAuth, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'copilot.html'));
 });
 
-// ── NuclearAgent Chat Redirect ───────────────────────────
+// ── Orbit Chat Redirect ───────────────────────────
 // /chat page retired. Redirect to dashboard with chat widget open via query param.
 app.get('/chat', auth.requireAuth, (req, res) => {
   res.redirect(302, '/dashboard?chat=open');
@@ -3786,7 +3900,109 @@ If multiple files change, include all of them. Always provide the COMPLETE file 
   }
 });
 
-app.listen(port, () => {
+// ── SPA Catch-All Route ────────────────────────────────────────────────────
+// For any unmatched GET requests (after all API routes, static files, etc),
+// serve the React SPA entry point so React Router can handle client-side navigation
+app.get('*', (req, res) => {
+  if (req.method === 'GET') {
+    res.sendFile('react-build/index.html', { root: path.join(__dirname, 'public') });
+  } else {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+// Run all pending migrations before accepting traffic.
+// Uses the same Pool as the rest of the app; runs once per migration.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const { Pool } = require('pg');
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+  (async () => {
+    const client = await pool.connect();
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS _migrations (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL UNIQUE,
+          applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      const { rows: applied } = await client.query('SELECT name FROM _migrations');
+      const appliedNames = new Set(applied.map(r => r.name));
+      const migrationsDir = path.join(__dirname, 'migrations');
+      const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.js')).sort();
+      for (const file of files) {
+        const m = require(path.join(migrationsDir, file));
+        const name = m.name || file.replace('.js', '');
+        if (appliedNames.has(name)) continue;
+        console.log(`[migrate] Applying: ${name}`);
+        await client.query('BEGIN');
+        try {
+          await m.up(client);
+          await client.query('INSERT INTO _migrations (name) VALUES ($1)', [name]);
+          await client.query('COMMIT');
+          console.log(`[migrate] Applied: ${name}`);
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw new Error(`Migration failed (${name}): ${err.message}`);
+        }
+      }
+      console.log('[migrate] All migrations applied.');
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  })().catch(err => {
+    console.error('[migrate] Fatal:', err.message);
+    process.exit(1);
+  });
+}
+
+// ── Global Process Safety Net ──────────────────────────────────────────────
+// Log unhandled rejections and uncaught exceptions without crashing the server.
+// Unhandled rejections from fire-and-forget async calls (analytics, tracing, etc.)
+// previously caused process.exit(1) in Node ≥15. This safety net prevents that.
+// Specific known error paths already catch at source — this is the last resort.
+process.on('unhandledRejection', (reason, promise) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error('[BuildOrbit] Unhandled rejection (caught by safety net):', msg, { promise });
+  // Do NOT exit — allow in-flight requests and pipelines to complete.
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[BuildOrbit] Uncaught exception (caught by safety net):', err.message, { stack: err.stack });
+  // Do NOT exit — Express stays alive and continues serving requests.
+});
+
+// ── Graceful Shutdown ─────────────────────────────────────────────────────
+// Drain the DB connection pool and stop accepting new connections on SIGTERM/SIGINT.
+// Render sends SIGTERM before a deploy restart — this prevents stale connections.
+async function gracefulShutdown(signal) {
+  console.log(`[BuildOrbit] Received ${signal}; initiating graceful shutdown`);
+  server.close(async () => {
+    console.log('[BuildOrbit] HTTP server closed');
+    try {
+      await pool.end();
+      console.log('[BuildOrbit] Database pool drained');
+    } catch (err) {
+      console.error('[BuildOrbit] Pool drain error (non-fatal):', err.message);
+    }
+    process.exit(0);
+  });
+
+  // Force-exit after 15 seconds if graceful shutdown stalls
+  setTimeout(() => {
+    console.error('[BuildOrbit] Graceful shutdown timed out — forcing exit');
+    process.exit(1);
+  }, 15_000).unref();
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
+const server = app.listen(port, () => {
   console.log(`[BuildOrbit] Server running on port ${port}`);
   console.log(`[BuildOrbit] Pipeline agents: PlannerAgent → BuilderAgent → OpsAgent → QAAgent`);
   console.log(`[BuildOrbit] Orchestrator initialized with agent registry + event bus + stage contracts`);

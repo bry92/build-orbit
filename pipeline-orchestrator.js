@@ -42,7 +42,7 @@ const { formatProductContext, loadProductContextFromEnv } = require('../lib/prod
 const { classify: classifyIntent, validateScaffoldAgainstContract, validateCodeAgainstContract, formatConstraintBlock } = require('../phases/intent-gate');
 const constraintLearner = require('../lib/constraint-learner');
 const { validateCCO, computeCCOHash, verifyCCOHash } = require('../lib/cco-validator');
-const { FRONTEND_ROOT_FILES, JS_EQUIVALENTS, buildManifestSet, applyEquivalenceRenames } = require('./lib/manifest-constants');
+const { FRONTEND_ROOT_FILES, JS_EQUIVALENTS, buildManifestSet, applyEquivalenceRenames } = require('./src/lib/manifest-constants');
 const analytics = require('../lib/analytics');
 const {
   sendPipelineCompleteEmail,
@@ -588,9 +588,42 @@ class PipelineOrchestrator {
       // ── Persist: intent_gate STARTED ──────────────────────────────────────
       await this.stateMachine.transition(runId, 'intent_gate', 'started');
 
+      // ── Fetch GitHub connection context for repo-aware detection ────────────
+      // Look up the run owner's GitHub connection so classify() can detect
+      // repo-referencing prompts and route to repo_aware intent classes.
+      // Fail-open: if the lookup throws, repoContext stays null → greenfield.
+      let _repoContext = null;
+      try {
+        // Fetch (1) user_id + github_repo (pre-selected by user in UI) from pipeline_runs,
+        // (2) whether the user has a github_connections row (has_connection).
+        // If github_repo is not set for this run but the user has a connection, we treat
+        // them as connected (no repo selected yet → prompt referencing repo triggers halt).
+        const _runRow = await this.pool.query(
+          'SELECT user_id, github_repo FROM pipeline_runs WHERE id = $1',
+          [runId]
+        );
+        const _userId = _runRow.rows[0]?.user_id;
+        const _selectedRepo = _runRow.rows[0]?.github_repo || null;
+        if (_userId) {
+          const _ghRow = await this.pool.query(
+            'SELECT github_login FROM github_connections WHERE user_id = $1 LIMIT 1',
+            [_userId]
+          );
+          if (_ghRow.rows.length > 0) {
+            _repoContext = {
+              hasConnection: true,
+              repoFullName: _selectedRepo, // may be null if user hasn't selected a repo yet
+              repoFiles: [],               // repo files fetched lazily by Plan phase via Serena
+            };
+          }
+        }
+      } catch (_ghLookupErr) {
+        console.warn('[Orchestrator] GitHub context lookup failed (non-fatal):', _ghLookupErr.message);
+      }
+
       let rawContract;
       try {
-        rawContract = await classifyIntent(prompt, this.pool, runId);
+        rawContract = await classifyIntent(prompt, this.pool, runId, _repoContext);
       } catch (classifyErr) {
         const msg = `INTENT_GATE_FAILED: classify() threw: ${classifyErr.message}`;
         console.error(`[Orchestrator] ${msg}`);
@@ -610,6 +643,24 @@ class PipelineOrchestrator {
         // Persist: intent_gate FAILED
         await this.stateMachine.transition(runId, 'intent_gate', 'failed', { error: msg }, msg)
           .catch(e => console.error('[Orchestrator] Failed to persist intent gate failure:', e.message));
+        this.eventBus.pipelineFailed(runId, 'intent_gate', msg);
+        if (ops) ops.onPipelineFailed(runId, 'intent_gate', msg);
+        return;
+      }
+
+      // ── Repo-connection required halt ─────────────────────────────────────────
+      // Prompt references an existing repo but the user has no GitHub connection.
+      // Surface a clear error instead of running a misguided greenfield build.
+      if (rawContract._repo_connection_required) {
+        const clarificationMsg = rawContract._rejection_reason ||
+          'Your prompt references an existing repository, but no GitHub repo is connected.';
+        const msg = `INTENT_GATE_FAILED: ${clarificationMsg}`;
+        console.warn(`[Orchestrator] Repo connection required: ${clarificationMsg}`);
+        await this.stateMachine.transition(runId, 'intent_gate', 'failed', {
+          run_event: 'REPO_CONNECTION_REQUIRED',
+          error: msg,
+          clarification_required: true,
+        }, msg).catch(e => console.error('[Orchestrator] Failed to persist repo connection halt:', e.message));
         this.eventBus.pipelineFailed(runId, 'intent_gate', msg);
         if (ops) ops.onPipelineFailed(runId, 'intent_gate', msg);
         return;
@@ -688,10 +739,15 @@ class PipelineOrchestrator {
       // Single source of truth: written once here, read by all downstream consumers.
       {
         const _icMap = {
-          static_surface: 'STATIC_SURFACE',
-          light_app:      'INTERACTIVE_LIGHT_APP',
-          soft_expansion: 'INTERACTIVE_LIGHT_APP',
-          full_product:   'PRODUCT_SYSTEM',
+          static_surface:  'STATIC_SURFACE',
+          light_app:       'INTERACTIVE_LIGHT_APP',
+          soft_expansion:  'INTERACTIVE_LIGHT_APP',
+          full_product:    'PRODUCT_SYSTEM',
+          // Repo-aware intent classes — map to canonical REPO_AWARE for analytics
+          repo_hardening:  'REPO_AWARE',
+          repo_refactor:   'REPO_AWARE',
+          repo_feature:    'REPO_AWARE',
+          repo_fix:        'REPO_AWARE',
         };
         const _canonicalIntentClass = _icMap[ctx.constraintContract.intent_class] || null;
         if (_canonicalIntentClass && this.pool) {
@@ -1041,7 +1097,10 @@ class PipelineOrchestrator {
         // 10a. SCAFFOLD HARD GATE — deep manifest validation.
         // If scaffold output doesn't contain a valid manifest (files[], structure{}, constraints{}),
         // the pipeline STOPS. CODE cannot proceed without a binding contract.
-        if (stage === 'scaffold' && validatedOutput) {
+        // Repo-aware builds skip this gate: the BuilderAgent returns a synthetic
+        // "skipped" scaffold object that represents the existing repo structure.
+        const _isRepoAwareScaffold = ctx.constraintContract && ctx.constraintContract._repo_aware;
+        if (stage === 'scaffold' && validatedOutput && !_isRepoAwareScaffold) {
           try {
             const scaffoldIntentClass = ctx.constraintContract ? ctx.constraintContract.intent_class : null;
             validateScaffoldManifest(validatedOutput, scaffoldIntentClass);
@@ -1088,13 +1147,17 @@ class PipelineOrchestrator {
             }
             console.log(`[Orchestrator] Intent Gate scaffold check ✓ (${ctx.constraintContract.intent_class})`);
           }
+        } else if (stage === 'scaffold' && _isRepoAwareScaffold) {
+          console.log(`[Orchestrator] Scaffold manifest gate skipped — repo-aware mode (existing repo structure preserved)`);
         }
 
         // 10b. POST-CODE ENFORCEMENT + VALIDATION — enforce scaffold manifest on CODE output.
         // Defense-in-depth: even if the agent's internal enforcement failed or was bypassed
         // (e.g., simulated fallback, AI error), the orchestrator strips unexpected files
         // and only fails on MISSING files (which indicate CODE genuinely failed).
-        if (stage === 'code' && validatedOutput && validatedOutput.files) {
+        // Repo-aware builds skip this: CODE produces targeted patches (not a greenfield manifest).
+        const _isRepoAwareCode = ctx.constraintContract && ctx.constraintContract._repo_aware;
+        if (stage === 'code' && validatedOutput && validatedOutput.files && !_isRepoAwareCode) {
           const scaffoldData = await this.executor.getPreviousOutputs(runId);
           if (scaffoldData.scaffold && scaffoldData.scaffold.files) {
             // ── STEP 1: STRIP unexpected files before validation ──────────
@@ -1378,22 +1441,24 @@ class PipelineOrchestrator {
           try {
             const passedCount = validatedOutput.checks.filter(c => c.passed).length;
             const totalChecks = validatedOutput.checks.length;
+            const criticalFails = validatedOutput.checks.filter(c => !c.passed && c.severity === 'critical');
             this.stateMachine.emit(`run:${runId}`, {
               run_id: runId,
               stage: 'verify',
               status: 'verify_report',
               payload: JSON.stringify({
                 checks: validatedOutput.checks,
+                audit: validatedOutput.audit || null,
                 sectionReport: validatedOutput.sectionReport || [],
-                passed: passedCount === totalChecks,
                 passedCount,
                 totalChecks,
+                hasCriticalFailures: criticalFails.length > 0,
                 errors: validatedOutput.errors || [],
                 warnings: validatedOutput.warnings || [],
               }),
               created_at: new Date().toISOString(),
             });
-            console.log(`[Orchestrator] verify_report emitted: ${passedCount}/${totalChecks} checks passed`);
+            console.log(`[Orchestrator] verify_report emitted: ${passedCount}/${totalChecks} checks passed (${criticalFails.length} critical failures)`);
           } catch (_) { /* non-fatal */ }
         }
 
@@ -1419,16 +1484,18 @@ class PipelineOrchestrator {
                 try {
                   const _hPassedCount = validatedOutput.checks.filter(c => c.passed).length;
                   const _hTotalChecks = validatedOutput.checks.length;
+                  const _hCriticalFails = validatedOutput.checks.filter(c => !c.passed && c.severity === 'critical');
                   this.stateMachine.emit(`run:${runId}`, {
                     run_id: runId,
                     stage: 'verify',
                     status: 'verify_report',
                     payload: JSON.stringify({
                       checks: validatedOutput.checks,
+                      audit: validatedOutput.audit || null,
                       sectionReport: validatedOutput.sectionReport || [],
-                      passed: _hPassedCount === _hTotalChecks,
                       passedCount: _hPassedCount,
                       totalChecks: _hTotalChecks,
+                      hasCriticalFailures: _hCriticalFails.length > 0,
                       errors: validatedOutput.errors || [],
                       warnings: validatedOutput.warnings || [],
                       selfHealed: healResult.healed || false,
@@ -1579,23 +1646,72 @@ class PipelineOrchestrator {
       this.runTrace.clearRun(runId);
     }
 
-    // ── VERIFY GATE: Route to success or failure path ──────────────────────
-    // validatedOutput.passed === true is the SINGLE gate for run completion.
-    // If verify checks failed, the run is treated as failed — no credits,
-    // no success email, no deploy, no success SSE/toast.
-    const _verifyPassed = ctx._verifyOutput && ctx._verifyOutput.passed === true;
+    // ── RUNTIME VERDICT: Resolve canonical run state from audit report ──────
+    // The Orbit runtime is the SOLE authority for determining run completion state.
+    // VERIFY submits an audit report; the runtime reads it alongside all phase data
+    // and resolves: completed | partial_success | failed.
+    //
+    // Decision matrix:
+    //   All checks pass                     → completed
+    //   No critical failures, some advisory → partial_success
+    //   Any critical failure                → failed
+    //   No audit data (verify didn't run)   → failed
+    const _verifyOutput = ctx._verifyOutput || {};
+    const _checks = Array.isArray(_verifyOutput.checks) ? _verifyOutput.checks : [];
+    const _audit = _verifyOutput.audit || {};
+    const _passedCount = _audit.passedCount ?? _checks.filter(c => c.passed).length;
+    const _totalChecks = _audit.totalChecks ?? _checks.length;
+    const _criticalFailures = _audit.criticalFailures || _checks.filter(c => !c.passed && c.severity === 'critical').map(c => c.name);
+    const _advisoryFailures = _audit.advisoryFailures || _checks.filter(c => !c.passed && c.severity === 'advisory').map(c => c.name);
+    const _hasCriticalFailures = _criticalFailures.length > 0;
 
-    if (!_verifyPassed) {
-      // ── VERIFY FAILED PATH ──────────────────────────────────────────────
-      const _failChecks = Array.isArray(ctx._verifyOutput?.checks) ? ctx._verifyOutput.checks : [];
-      const _failCount = _failChecks.filter(c => !c.passed).length;
-      const _totalCount = _failChecks.length;
-      const _failMsg = `Verification failed: ${_failCount}/${_totalCount} checks did not pass`;
+    let _runtimeVerdict;
+    let _verdictReason;
 
-      console.log(`[Orchestrator] Run ${runId.slice(0, 8)}... VERIFY FAILED — ${_failMsg}`);
+    if (_totalChecks === 0) {
+      // No checks ran — treat as failed (verify didn't produce anything)
+      _runtimeVerdict = 'failed';
+      _verdictReason = 'VERIFY produced no audit checks';
+    } else if (_passedCount === _totalChecks) {
+      // All checks passed — clean success
+      _runtimeVerdict = 'completed';
+      _verdictReason = `All ${_totalChecks} checks passed`;
+    } else if (_hasCriticalFailures) {
+      // Critical failures — build is fundamentally broken
+      _runtimeVerdict = 'failed';
+      _verdictReason = `Critical failure(s): ${_criticalFailures.join(', ')}`;
+    } else {
+      // Only advisory failures — build works but has quality findings
+      _runtimeVerdict = 'partial_success';
+      _verdictReason = `${_passedCount}/${_totalChecks} checks passed. Advisory findings: ${_advisoryFailures.join(', ')}`;
+    }
+
+    console.log(`[Orchestrator] Runtime verdict for ${runId.slice(0, 8)}: ${_runtimeVerdict} — ${_verdictReason}`);
+
+    // Finalize run state via state machine (single authority transition)
+    const _auditSummary = {
+      passedCount: _passedCount,
+      totalChecks: _totalChecks,
+      criticalFailures: _criticalFailures,
+      advisoryFailures: _advisoryFailures,
+      verdict: _runtimeVerdict,
+      reason: _verdictReason,
+    };
+
+    try {
+      await this.stateMachine.finalizeRun(runId, _runtimeVerdict, {
+        error: _runtimeVerdict === 'failed' ? _verdictReason : undefined,
+        auditSummary: _auditSummary,
+      });
+    } catch (finalizeErr) {
+      console.error(`[Orchestrator] Failed to finalize run ${runId.slice(0, 8)}:`, finalizeErr.message);
+    }
+
+    if (_runtimeVerdict === 'failed') {
+      // ── FAILED PATH ──────────────────────────────────────────────
+      const _failMsg = `Verification failed: ${_verdictReason}`;
 
       this.eventBus.pipelineFailed(runId, 'verify', _failMsg);
-
       if (ops) ops.onPipelineFailed(runId, 'verify', _failMsg);
 
       // Analytics: PIPELINE_FAILED (fire-and-forget)
@@ -1607,8 +1723,10 @@ class PipelineOrchestrator {
             run_id:       runId,
             failed_phase: 'verify',
             error_type:   'verification_checks_failed',
-            pass_count:   _failChecks.filter(c => c.passed).length,
-            fail_count:   _failCount,
+            verdict:      _runtimeVerdict,
+            pass_count:   _passedCount,
+            fail_count:   _totalChecks - _passedCount,
+            critical_failures: _criticalFailures,
             duration_ms:  ctx._pipelineStartMs ? (Date.now() - ctx._pipelineStartMs) : null,
           });
         } catch (_) {}
@@ -1618,22 +1736,22 @@ class PipelineOrchestrator {
       return;
     }
 
-    // ── VERIFY PASSED — Success path ────────────────────────────────────────
+    // ── SUCCESS or PARTIAL_SUCCESS path ─────────────────────────────────────
     this.eventBus.pipelineCompleted(runId);
-
     if (ops) ops.onPipelineComplete(runId);
 
-    // ── Analytics: PIPELINE_COMPLETED (fire-and-forget) ───────────────────
+    // ── Analytics (fire-and-forget) ───────────────────────────────────────
     ;(async () => {
       try {
         const userRow = await this.pool.query('SELECT user_id FROM pipeline_runs WHERE id = $1', [runId]);
         const userId = userRow.rows[0]?.user_id || null;
-        const verifyChecks = Array.isArray(ctx._verifyOutput?.checks) ? ctx._verifyOutput.checks : [];
-        await analytics.emitEvent(this.pool, 'PIPELINE_COMPLETED', userId, {
+        await analytics.emitEvent(this.pool, _runtimeVerdict === 'completed' ? 'PIPELINE_COMPLETED' : 'PIPELINE_PARTIAL_SUCCESS', userId, {
           run_id:       runId,
           intent_class: ctx.constraintContract?.intent_class || null,
-          pass_count:   verifyChecks.filter(c => c.passed).length,
-          fail_count:   verifyChecks.filter(c => !c.passed).length,
+          verdict:      _runtimeVerdict,
+          pass_count:   _passedCount,
+          fail_count:   _totalChecks - _passedCount,
+          advisory_failures: _advisoryFailures,
           duration_ms:  ctx._pipelineStartMs ? (Date.now() - ctx._pipelineStartMs) : null,
         });
       } catch (_) {}

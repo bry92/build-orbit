@@ -3,7 +3,7 @@ services:
     runtime: node
     name: app
     buildCommand: npm install && npm run build && npm run build:cli
-    startCommand: npm start
+    startCommand: node scripts/migrate-and-start.js
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV

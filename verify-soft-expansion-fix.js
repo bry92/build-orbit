@@ -5,9 +5,9 @@
  * Fix: BUDGET_INTERPOLATION in lib/soft-expansion.js now maps to valid enum values.
  */
 
-const { buildSoftExpansionContract } = require('./lib/soft-expansion.js');
-const { validateCCO } = require('./lib/cco-validator.js');
-const { CONTRACTS } = require('./agents/intent-gate.js');
+const { buildSoftExpansionContract } = require('./src/lib/soft-expansion.js');
+const { validateCCO } = require('./src/lib/cco-validator.js');
+const { CONTRACTS } = require('./src/agents/intent-gate.js');
 
 let passed = 0;
 let failed = 0;

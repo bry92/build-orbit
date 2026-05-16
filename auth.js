@@ -531,7 +531,7 @@ function sendViaPolsiaProxy(to, subject, html, apiKey) {
  * @returns {Promise<{sent: boolean, messageId?: string, reason?: string, response?: object}>}
  */
 async function sendMagicLinkEmail(email, token, deviceContext = {}, pool = null, runId = null) {
-  const appUrl = 'https://buildorbit.polsia.app';
+  const appUrl = process.env.APP_URL || 'http://localhost:3000';
   const verifyUrl = `${appUrl}/auth/verify?token=${token}`;
   const serverToken = process.env.POSTMARK_SERVER_TOKEN;
 
@@ -578,7 +578,11 @@ async function sendMagicLinkEmail(email, token, deviceContext = {}, pool = null,
       console.log('[Auth] No POSTMARK_SERVER_TOKEN — trying Polsia email proxy for magic link to:', email);
       return sendViaPolsiaProxy(email, 'Your BuildOrbit magic link', html, polsiaKey);
     }
-    console.error('[Auth] EMAIL_SEND_FAILED — no email transport available. Magic link:', verifyUrl);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[Auth] Development magic link:', verifyUrl);
+      return { sent: true, messageId: 'development-console-link' };
+    }
+    console.error('[Auth] EMAIL_SEND_FAILED - no email transport available. Magic link:', verifyUrl);
     return { sent: false, reason: 'no_transport' };
   }
 

@@ -11,3 +11,8 @@ node_modules/
 .tmp/
 projects/
 *.jsonl
+.restore/
+
+# Local/restored downloadable archives
+public/public/downloads/*.tar.gz
+public/downloads/*.tar.gz

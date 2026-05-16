@@ -20,6 +20,7 @@
  *     }
  *   };
  */
+require('./src/lib/load-env').loadEnv();
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');

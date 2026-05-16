@@ -4,21 +4,28 @@
  * States: queued → intent_gate_running → intent_gate_complete
  *         → plan_running → plan_complete → scaffold_running → scaffold_complete
  *         → code_running → code_complete → save_running → save_complete
- *         → verify_running → verify_complete → completed
+ *         → verify_running → verify_complete → completed | partial_success | failed
+ *
+ * Terminal states: completed (all checks pass), partial_success (advisory failures
+ * only, no critical failures), failed (critical failures or phase errors).
  *
  * Any *_running state can also → failed
  * Any *_complete state can also → paused (human intervention)
  * paused → next stage *_running (on resume)
  * failed → {stage}_running (retry)
  *
+ * AUTHORITY: Only the Orbit runtime (pipeline-orchestrator) determines the
+ * canonical terminal state. The VERIFY phase is an auditor — it submits findings,
+ * not verdicts. The state machine enforces transitions but does not interpret
+ * VERIFY output.
+ *
  * Source of truth: pipeline_events table (append-only event log)
  * pipeline_runs.state is a cached projection, updated on every transition.
  *
- * NOTE: After pipeline completes (verify_complete → completed), a 7th DEPLOY phase
- * may run asynchronously for STATIC_SURFACE builds. Deploy progress is tracked via
- * SSE events (deploy_started, deploy_uploading, deploy_complete, deploy_failed) but
- * is NOT a formal state machine stage — it runs post-completion and does not affect
- * pipeline_runs.status.
+ * NOTE: After pipeline completes (verify_complete → completed|partial_success),
+ * a 7th DEPLOY phase may run asynchronously for STATIC_SURFACE builds. Deploy
+ * progress is tracked via SSE events but is NOT a formal state machine stage —
+ * it runs post-completion and does not affect pipeline_runs.status.
  */
 
 const EventEmitter = require('events');
@@ -39,8 +46,9 @@ const TRANSITIONS = {
   'save_running':           ['save_complete', 'failed'],
   'save_complete':          ['verify_running', 'paused'],
   'verify_running':         ['verify_complete', 'failed'],
-  'verify_complete':        ['completed'],
+  'verify_complete':        ['completed', 'partial_success', 'failed'],
   'completed':              [],
+  'partial_success':        [],
   'failed':                 STAGES.map(s => `${s}_running`), // retry from any stage
   // paused can resume into any stage (orchestrator sets the right next stage)
   'paused':                 STAGES.map(s => `${s}_running`),
@@ -189,22 +197,19 @@ class PipelineStateMachine extends EventEmitter {
         return existing.rows[0];
       }
 
-      // Update cached state on pipeline_runs
+      // Update cached state on pipeline_runs.
+      // NOTE: For verify completion, the state machine no longer interprets the
+      // VERIFY payload. It transitions to verify_complete and the orchestrator
+      // calls finalizeRun() to set the canonical terminal state.
       const updateFields = { state: targetState };
       if (status === 'failed') {
         updateFields.status = 'failed';
         updateFields.error = error;
       } else if (stage === 'verify' && status === 'completed') {
-        // Gate: only mark run as 'completed' if ALL verify checks passed.
-        // If verify checks failed, the run status is 'failed' — not 'completed'.
-        const verifyPassed = payload && payload.passed === true;
-        if (verifyPassed) {
-          updateFields.status = 'completed';
-          updateFields.completed_at = new Date().toISOString();
-        } else {
-          updateFields.status = 'failed';
-          updateFields.error = 'Verification checks failed';
-        }
+        // Transition to verify_complete — orchestrator will call finalizeRun()
+        // to resolve the canonical terminal state (completed/partial_success/failed).
+        updateFields.status = 'running'; // still "running" until finalized
+        updateFields.current_phase = 'verify';
       } else {
         updateFields.status = 'running';
         updateFields.current_phase = stage;
@@ -235,6 +240,93 @@ class PipelineStateMachine extends EventEmitter {
   }
 
   /**
+   * Finalize a pipeline run with a canonical terminal state.
+   *
+   * Called ONLY by the Orbit runtime (pipeline-orchestrator) after all phases
+   * complete. The runtime reads the VERIFY audit report + all phase data and
+   * determines the verdict. No other component may call this method.
+   *
+   * @param {string} runId   - Pipeline run UUID
+   * @param {'completed'|'partial_success'|'failed'} verdict - Runtime's determination
+   * @param {object} [opts]
+   * @param {string} [opts.error]         - Error message (if verdict is 'failed')
+   * @param {object} [opts.auditSummary]  - Structured audit summary attached to run
+   * @returns {object} The updated run record
+   */
+  async finalizeRun(runId, verdict, opts = {}) {
+    if (!['completed', 'partial_success', 'failed'].includes(verdict)) {
+      throw new Error(`Invalid finalize verdict: ${verdict}`);
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Lock row and verify current state allows finalization
+      const { rows: runRows } = await client.query(
+        'SELECT state FROM pipeline_runs WHERE id = $1 FOR UPDATE',
+        [runId]
+      );
+      if (runRows.length === 0) {
+        await client.query('ROLLBACK');
+        throw new Error(`Pipeline run not found: ${runId}`);
+      }
+
+      const currentState = runRows[0].state || 'queued';
+      const allowed = TRANSITIONS[currentState] || [];
+      if (!allowed.includes(verdict)) {
+        await client.query('ROLLBACK');
+        throw new Error(
+          `Invalid finalize transition: ${currentState} → ${verdict} ` +
+          `(allowed: ${allowed.join(', ') || 'none'})`
+        );
+      }
+
+      // Update pipeline_runs with the canonical terminal state
+      const updateFields = {
+        state: verdict,
+        status: verdict,
+      };
+      if (verdict === 'completed' || verdict === 'partial_success') {
+        updateFields.completed_at = new Date().toISOString();
+      }
+      if (opts.error) {
+        updateFields.error = opts.error;
+      }
+
+      const keys = Object.keys(updateFields);
+      const values = Object.values(updateFields);
+      const sets = keys.map((k, i) => `"${k}" = $${i + 2}`).join(', ');
+      await client.query(
+        `UPDATE pipeline_runs SET ${sets} WHERE id = $1`,
+        [runId, ...values]
+      );
+
+      await client.query('COMMIT');
+
+      // Emit finalization event for SSE subscribers
+      this.emit(`run:${runId}`, {
+        run_id: runId,
+        stage: '_runtime',
+        status: verdict,
+        payload: JSON.stringify({
+          verdict,
+          audit_summary: opts.auditSummary || null,
+          error: opts.error || null,
+        }),
+        created_at: new Date().toISOString(),
+      });
+
+      return { verdict, runId };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Check if a stage has already been completed for a run.
    * Used for idempotent retries.
    */
@@ -256,7 +348,7 @@ class PipelineStateMachine extends EventEmitter {
     const state = await this.getState(runId);
 
     if (state === 'queued') return 'intent_gate';
-    if (state === 'completed' || state === 'failed') return null;
+    if (state === 'completed' || state === 'partial_success' || state === 'failed') return null;
 
     // Find which stage just completed
     for (let i = 0; i < STAGES.length; i++) {

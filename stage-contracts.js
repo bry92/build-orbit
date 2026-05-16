@@ -22,8 +22,8 @@
  *              Output: { checks[], passed: boolean, errors[], warnings[] }
  */
 
-const { getScaffoldSchema } = require('./lib/scaffold-schemas');
-const { FRONTEND_ROOT_FILES, JS_EQUIVALENTS } = require('./lib/manifest-constants');
+const { getScaffoldSchema } = require('./src/lib/scaffold-schemas');
+const { FRONTEND_ROOT_FILES, JS_EQUIVALENTS } = require('./src/lib/manifest-constants');
 
 // ── Schema Definitions ───────────────────────────────────
 

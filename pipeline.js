@@ -17,7 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const OpenAI = require('openai');
-const { FRONTEND_ROOT_FILES, JS_EQUIVALENTS, buildManifestSet, applyEquivalenceRenames } = require('./lib/manifest-constants');
+const { FRONTEND_ROOT_FILES, JS_EQUIVALENTS, buildManifestSet, applyEquivalenceRenames } = require('./src/lib/manifest-constants');
 const { extractFileTree } = require('./src/lib/file-tree-parser');
 
 const PHASES = [
