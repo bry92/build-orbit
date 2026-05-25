@@ -3590,6 +3590,10 @@ app.use('/a2a/orbit', createOrbitRouter({ pool, pipeline, orchestrator, stateMac
 // Analytics API — GET /api/analytics/summary (session auth required)
 app.use('/api/analytics', createAnalyticsRouter({ pool, auth }));
 
+// Audit Packets API — evidence bundles for Cursor/Lovable/agency/manual work
+const { createAuditPacketsRouter } = require('./src/routes/audit-packets');
+app.use('/api/audit-packets', createAuditPacketsRouter({ pool, auth }));
+
 // Runs API — GET /api/runs/:id/reasoning (phase reasoning timeline, 3s polling)
 app.use('/api/runs', createRunsRouter({ pool, auth, pipeline }));
 
