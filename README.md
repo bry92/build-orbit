@@ -32,6 +32,14 @@ The test command maps to `node scripts/run-unit-tests.js`.
 
 Secrets must live in the platform environment, never in the repository. `.env.example` documents the required variables and intentionally contains no secret values.
 
+On Render, the service start command should be:
+
+```bash
+node scripts/migrate-and-start.js
+```
+
+If deploy logs show `Running 'node server.js'`, update the service setting or re-sync `render.yaml` before redeploying so migrations run before the app starts.
+
 Required production settings:
 
 - `NODE_ENV=production`

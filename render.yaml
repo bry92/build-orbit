@@ -8,3 +8,25 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: MOCK_MODE
+        value: "false"
+      - key: APP_URL
+        value: https://buildorbit.polsia.app
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ARTIFACT_STORAGE
+        value: s3
+      - key: ARTIFACT_S3_BUCKET
+        sync: false
+      - key: ARTIFACT_S3_ACCESS_KEY_ID
+        sync: false
+      - key: ARTIFACT_S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: ARTIFACT_S3_REGION
+        value: auto
+      - key: ARTIFACT_S3_PREFIX
+        value: artifacts

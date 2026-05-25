@@ -1,17 +1,15 @@
 /**
- * Polsia Environment Dependencies
+ * Environment Dependencies
  *
- * This app runs on Polsia infrastructure. The following env vars are provisioned
- * automatically by Polsia on Render — no separate .env setup is needed in production.
- *
- * When migrating OFF Polsia, you must provision these independently:
+ * Production secrets must be configured in the platform environment, never in
+ * the repository. The server validates required settings before booting:
  *
  *   OPENAI_API_KEY       → Direct OpenAI key (platform.openai.com)
- *   OPENAI_BASE_URL      → Remove or set to https://api.openai.com/v1
+ *   OPENAI_BASE_URL      → Optional OpenAI-compatible proxy URL
  *   JWT_SECRET           → Required. Independent 32+ byte secret for JWT signing.
- *   POLSIA_API_KEY       → Used for email proxy auth. Replace with POSTMARK_SERVER_TOKEN.
- *   POLSIA_API_TOKEN     → Alias for POLSIA_API_KEY — can be same value or removed.
- *   DATABASE_URL         → Provision a new Neon (neon.tech) or PostgreSQL database.
+ *   POLSIA_API_KEY       → Optional email proxy credential.
+ *   POLSIA_API_TOKEN     → Optional alias for POLSIA_API_KEY.
+ *   DATABASE_URL         → PostgreSQL connection string.
  *
  * See .env.example for the full list of required and optional env vars.
  */
