@@ -5,15 +5,16 @@
   "engines": {
     "node": "20.x"
   },
-  "scripts": {
+ "scripts": {
     "start": "node scripts/migrate-and-start.js",
     "dev": "node server.js",
-    "build": "cd buildorbit-frontend && npm install --include=dev && npm run build && cd .. && npm run build:cli",
+    "build": "npm run build:frontend && npm run build:cli",
+    "build:frontend": "cd buildorbit-frontend && npm ci --include=dev && npm run build && cd ..",
+    "build:cli": "node scripts/package-cli.js",
     "migrate": "node migrate.js",
     "test": "node scripts/run-unit-tests.js",
     "test:unit": "node scripts/run-unit-tests.js",
-    "publish:cli": "cd cli && npm install && npm publish --access public",
-    "build:cli": "node scripts/package-cli.js"
+    "publish:cli": "cd cli && npm install && npm publish --access public"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.750.0",
