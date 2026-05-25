@@ -518,7 +518,7 @@ async function sendViaPolsiaProxy(to, subject, html, apiKey) {
  * @returns {Promise<{sent: boolean, messageId?: string, reason?: string}>}
  */
 async function sendMagicLinkEmail(email, token, deviceContext = {}, pool = null, runId = null) {
-  const appUrl = 'https://buildorbit.polsia.app';
+  const appUrl = process.env.APP_URL || 'https://buildorbit.polsia.app';
   const verifyUrl = `${appUrl}/auth/verify?token=${token}`;
 
   console.log('[Auth] Attempting magic link send to:', email);

@@ -22,17 +22,17 @@ async function checkDbRateLimit(pool, scope, keyId, opts = {}) {
      VALUES ($1, 1, NOW())
      ON CONFLICT (rate_key) DO UPDATE SET
        count = CASE
-         WHEN api_rate_limits.window_start < NOW() - ($3::text)::interval
+         WHEN api_rate_limits.window_start < NOW() - ($2::text)::interval
          THEN 1
          ELSE api_rate_limits.count + 1
        END,
        window_start = CASE
-         WHEN api_rate_limits.window_start < NOW() - ($3::text)::interval
+         WHEN api_rate_limits.window_start < NOW() - ($2::text)::interval
          THEN NOW()
          ELSE api_rate_limits.window_start
        END
      RETURNING count, EXTRACT(EPOCH FROM window_start) * 1000 AS window_start_ms`,
-    [rateKey,`${windowMs} milliseconds`]
+    [rateKey, `${windowMs} milliseconds`]
   );
 
   const row = rows[0];

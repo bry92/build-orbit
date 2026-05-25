@@ -14,6 +14,14 @@
 
 const { v4: uuid } = require('uuid');
 
+function writeRequestLog(fields) {
+  console.log(JSON.stringify({
+    level: 'info',
+    service: 'buildorbit-api',
+    ...fields,
+  }));
+}
+
 /**
  * Express middleware that attaches a correlation ID to every request.
  *
@@ -44,14 +52,29 @@ function correlationIdMiddleware() {
     const userAgent = req.headers['user-agent'] || 'unknown';
     const clientIp = req.ip || 'unknown';
 
-    console.log(`[${correlationId}] ${method} ${path} ${query} | ip=${clientIp} ua=${userAgent.substring(0, 40)}`);
+    writeRequestLog({
+      event: 'request_started',
+      requestId: correlationId,
+      method,
+      path,
+      query,
+      ip: clientIp,
+      userAgent: userAgent.substring(0, 120),
+    });
 
     // Log the response when it finishes
     const originalEnd = res.end;
     res.end = function(...args) {
       const statusCode = res.statusCode;
       const responseTime = Date.now() - req._startTime;
-      console.log(`[${correlationId}] → ${statusCode} ${responseTime}ms`);
+      writeRequestLog({
+        event: 'request_finished',
+        requestId: correlationId,
+        method,
+        path,
+        statusCode,
+        responseTimeMs: responseTime,
+      });
       return originalEnd.apply(res, args);
     };
 

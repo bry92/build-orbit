@@ -12,9 +12,10 @@ const express = require('express');
 const crypto  = require('crypto');
 const { sendSubscriptionConfirmationEmail } = require('../../backend/src/email/transactional');
 
-// Stripe subscription link ($29/month, created 2026-05-13 via Polsia Stripe MCP)
+// Stripe subscription link ($49/month, created 2026-05-13 via Polsia Stripe MCP)
 const STRIPE_SUBSCRIPTION_LINK = 'https://buy.stripe.com/3cIdRb8ec1uD2Bz0f05sA02';
 const APP_URL = process.env.APP_URL || 'https://buildorbit.polsia.app';
+const BILLING_PLAN_PRICE_USD = 49;
 
 // How many credits to provision on each event
 const CREDITS_ON_SIGNUP     = 10;  // checkout.session.completed
@@ -105,7 +106,7 @@ module.exports = function createBillingRouter({ pool, auth }) {
       if (email) params.set('prefilled_email', email);
 
       const checkoutUrl = `${STRIPE_SUBSCRIPTION_LINK}?${params.toString()}`;
-      res.json({ success: true, url: checkoutUrl });
+      res.json({ success: true, url: checkoutUrl, plan: { priceUsd: BILLING_PLAN_PRICE_USD, interval: 'month' } });
     } catch (err) {
       console.error('[Billing] /create-checkout error:', err);
       res.status(500).json({ success: false, message: 'Failed to create checkout' });

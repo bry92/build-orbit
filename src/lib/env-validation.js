@@ -82,6 +82,12 @@ function validateEnvironment() {
     errors.push('ARTIFACT_STORAGE: Must be "local" or "s3"');
   }
 
+  // Production artifacts must survive instance restarts. Local filesystem mode is
+  // only acceptable when it points at an explicitly documented durable mount.
+  if (isProduction && artifactStorage === 'local' && process.env.ARTIFACT_LOCAL_DURABLE !== 'true') {
+    errors.push('ARTIFACT_STORAGE: Production must use ARTIFACT_STORAGE=s3 or set ARTIFACT_LOCAL_DURABLE=true for a mounted persistent disk');
+  }
+
   // ── Security Checks ────────────────────────────────────────────────────────
 
   // Fail-safe: MOCK_MODE must never be true in production
