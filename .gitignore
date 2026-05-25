@@ -2,6 +2,10 @@ node_modules/
 .env
 .DS_Store
 
+# Runtime data (user builds, pipeline artifacts)
+artifacts/
+deployed/
+
 # Polsia safety (auto-injected)
 .env
 .env.*

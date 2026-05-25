@@ -58,28 +58,51 @@ const TOTAL_PHASES = 6;
 // partial state loss. Ideal fix: Redis-backed atomic INCR + EXPIRE (e.g. Upstash).
 // Upgrade path: provision Redis, swap Map for redis.incr() + redis.expire().
 
-// Map: keyId → { count: number, windowStart: number }
-const rateLimitWindows = new Map();
-const RATE_LIMIT = 10;          // max executions per window
-const WINDOW_MS  = 60 * 60 * 1000; // 1 hour
+const { checkDbRateLimit, WINDOW_MS_DEFAULT } = require('../lib/db-rate-limiter');
 
-function checkRateLimit(keyId) {
+// In-memory fallback when RATE_LIMIT_BACKEND=memory or DB unavailable
+const rateLimitWindows = new Map();
+const RATE_LIMIT = 10;
+const WINDOW_MS = WINDOW_MS_DEFAULT;
+
+function checkMemoryRateLimit(keyId) {
   const now = Date.now();
   const window = rateLimitWindows.get(keyId);
 
   if (!window || now - window.windowStart >= WINDOW_MS) {
-    // New window
     rateLimitWindows.set(keyId, { count: 1, windowStart: now });
     return { allowed: true, remaining: RATE_LIMIT - 1, resetAt: now + WINDOW_MS };
   }
 
   if (window.count >= RATE_LIMIT) {
-    const resetAt = window.windowStart + WINDOW_MS;
-    return { allowed: false, remaining: 0, resetAt };
+    return { allowed: false, remaining: 0, resetAt: window.windowStart + WINDOW_MS };
   }
 
   window.count++;
-  return { allowed: true, remaining: RATE_LIMIT - window.count, resetAt: window.windowStart + WINDOW_MS };
+  return {
+    allowed: true,
+    remaining: RATE_LIMIT - window.count,
+    resetAt: window.windowStart + WINDOW_MS,
+  };
+}
+
+/**
+ * @param {import('pg').Pool | null} pool
+ * @returns {(keyId: string|number) => Promise<{ allowed: boolean, remaining: number, resetAt: number }>}
+ */
+function createRateLimitChecker(pool) {
+  const useMemory = process.env.RATE_LIMIT_BACKEND === 'memory';
+  if (!pool || useMemory) {
+    return async (keyId) => checkMemoryRateLimit(keyId);
+  }
+  return async (keyId) => {
+    try {
+      return await checkDbRateLimit(pool, 'a2a', keyId, { limit: RATE_LIMIT, windowMs: WINDOW_MS });
+    } catch (err) {
+      console.error('[A2A] DB rate limit fallback to memory:', err.message);
+      return checkMemoryRateLimit(keyId);
+    }
+  };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -376,6 +399,7 @@ function translateToA2AEvents(stageEvent) {
  */
 function createA2ARouter({ pool, pipeline, orchestrator, stateMachine, auth }) {
   const router = express.Router();
+  const checkRateLimit = createRateLimitChecker(pool);
 
   // ── Bearer Token Middleware ──────────────────────────────────────────────
   //
@@ -582,7 +606,7 @@ function createA2ARouter({ pool, pipeline, orchestrator, stateMachine, auth }) {
     }
 
     // Rate limit check
-    const rl = checkRateLimit(req.apiKey.id);
+    const rl = await checkRateLimit(req.apiKey.id);
     res.setHeader('X-RateLimit-Limit', String(RATE_LIMIT));
     res.setHeader('X-RateLimit-Remaining', String(rl.remaining));
     res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt / 1000)));

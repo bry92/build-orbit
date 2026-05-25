@@ -58,6 +58,30 @@ function validateEnvironment() {
     errors.push('GitHub OAuth: Both GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set together');
   }
 
+  const isProduction = process.env.NODE_ENV?.toLowerCase() === 'production';
+  const hasStripe = !!process.env.STRIPE_SECRET_KEY;
+  const artifactStorage = (process.env.ARTIFACT_STORAGE || 'local').toLowerCase();
+
+  // STRIPE_WEBHOOK_SECRET: required in production when Stripe billing is enabled
+  if (isProduction && hasStripe && !process.env.STRIPE_WEBHOOK_SECRET) {
+    errors.push('STRIPE_WEBHOOK_SECRET: Required in production when STRIPE_SECRET_KEY is set');
+  }
+
+  // S3/R2 artifact storage
+  if (artifactStorage === 's3') {
+    if (!process.env.ARTIFACT_S3_BUCKET) {
+      errors.push('ARTIFACT_S3_BUCKET: Required when ARTIFACT_STORAGE=s3');
+    }
+    if (!process.env.ARTIFACT_S3_ACCESS_KEY_ID) {
+      errors.push('ARTIFACT_S3_ACCESS_KEY_ID: Required when ARTIFACT_STORAGE=s3');
+    }
+    if (!process.env.ARTIFACT_S3_SECRET_ACCESS_KEY) {
+      errors.push('ARTIFACT_S3_SECRET_ACCESS_KEY: Required when ARTIFACT_STORAGE=s3');
+    }
+  } else if (artifactStorage !== 'local') {
+    errors.push('ARTIFACT_STORAGE: Must be "local" or "s3"');
+  }
+
   // ── Security Checks ────────────────────────────────────────────────────────
 
   // Fail-safe: MOCK_MODE must never be true in production

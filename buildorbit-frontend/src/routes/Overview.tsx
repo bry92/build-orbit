@@ -113,6 +113,85 @@ export default function Overview() {
           </p>
         </section>
 
+        <section className="ov-section ov-demo-section" id="demo">
+          <div className="ov-section-label">Product demo</div>
+          <h2 className="ov-section-heading">From prompt to finished app, with every step visible.</h2>
+          <p className="ov-section-body">
+            BuildOrbit turns a simple request into a traceable build run, then shows the result as a real product surface.
+          </p>
+
+          <div className="ov-demo-flow" aria-label="Prompt to pipeline to finished app demo">
+            <article className="ov-demo-card ov-demo-prompt">
+              <div className="ov-demo-card-top">
+                <span className="ov-demo-step">01</span>
+                <strong>Prompt</strong>
+              </div>
+              <div className="ov-demo-prompt-box">
+                Build a client portal with project status, invoices, file sharing, and a polished dashboard.
+              </div>
+              <div className="ov-demo-prompt-meta">
+                <span>Business app</span>
+                <span>Dashboard</span>
+                <span>Client workflow</span>
+              </div>
+            </article>
+
+            <article className="ov-demo-card ov-demo-pipeline">
+              <div className="ov-demo-card-top">
+                <span className="ov-demo-step">02</span>
+                <strong>Pipeline</strong>
+              </div>
+              <div className="ov-demo-track">
+                {['Intent', 'Plan', 'Scaffold', 'Code', 'Save', 'Verify'].map((phase, index) => (
+                  <div key={phase} className="ov-demo-phase" style={{ animationDelay: `${index * 120}ms` }}>
+                    <span className="ov-demo-phase-dot" />
+                    <span>{phase}</span>
+                    <b>{index < 5 ? 'done' : 'passed'}</b>
+                  </div>
+                ))}
+              </div>
+            </article>
+
+            <article className="ov-demo-card ov-demo-result">
+              <div className="ov-demo-card-top">
+                <span className="ov-demo-step">03</span>
+                <strong>Finished app</strong>
+              </div>
+              <div className="ov-app-preview">
+                <div className="ov-app-preview-top">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="ov-app-preview-body">
+                  <div className="ov-app-sidebar">
+                    <span className="active" />
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <div className="ov-app-main">
+                    <div className="ov-app-title" />
+                    <div className="ov-app-metrics">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <div className="ov-app-table">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="ov-demo-result-caption">
+                Preview, inspect, refine, and ship from the same run.
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section className="ov-section" id="proof">
           <div className="ov-section-label">Glass-box execution</div>
           <h2 className="ov-section-heading">Six phases. One visible build path.</h2>

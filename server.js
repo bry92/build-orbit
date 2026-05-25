@@ -66,7 +66,7 @@ const { PipelineStateMachine } = require('./src/core/state-machine');
 const { PipelineEventBus } = require('./src/core/event-bus');
 const { PipelineOrchestrator } = require('./src/core/pipeline-orchestrator');
 const { createAgentRegistry } = require('./src/agents');
-const { ArtifactStore } = require('./src/core/artifact-store');
+const { createArtifactStore } = require('./src/lib/artifact-storage-factory');
 const { CostTracker } = require('./src/lib/cost-tracker');
 const { TraceStore } = require('./src/lib/trace-store');
 const { RunTrace } = require('./src/lib/run-trace');
@@ -108,9 +108,14 @@ const {
   validateMemoryCreate,
 } = require('./src/lib/input-validation');
 const { csrfTokenHandler, requireCsrf } = require('./src/lib/csrf');
+const { registerHealthRoutes } = require('./src/lib/health');
+const { errorHandler } = require('./src/lib/error-handler');
+const helmet = require('helmet');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+app.use(helmet({ contentSecurityPolicy: false }));
 
 // Fail fast if DATABASE_URL is missing
 if (!process.env.DATABASE_URL) {
@@ -138,7 +143,7 @@ const agentRegistry = createAgentRegistry(pool);
 // Artifact store: persists every stage output to local filesystem
 // Directory: ./artifacts/{runId}/{stage}/{filename}
 // Abstracted interface — swap basePath with S3 bucket later
-const artifactStore = new ArtifactStore('./artifacts');
+const artifactStore = createArtifactStore();
 
 // Cost tracker: per-run economics (token usage, USD cost, budget enforcement)
 const costTracker = new CostTracker();
@@ -207,10 +212,8 @@ app.use(cookieParser());
 // Accepts x-request-id header from clients; generates UUID if not provided.
 app.use(correlationIdMiddleware());
 
-// Health check endpoint (required for Render)
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', requestId: req.id });
-});
+// Health probes (Render uses /health; includes DB readiness check)
+registerHealthRoutes(app, pool);
 
 // GET /api/csrf-token — issue a CSRF token for the SPA.
 // The React frontend calls this on load and attaches the token to all
@@ -3904,12 +3907,11 @@ If multiple files change, include all of them. Always provide the COMPLETE file 
 // For any unmatched GET requests (after all API routes, static files, etc),
 // serve the React SPA entry point so React Router can handle client-side navigation
 app.get('*', (req, res) => {
-  if (req.method === 'GET') {
-    res.sendFile('react-build/index.html', { root: path.join(__dirname, 'public') });
-  } else {
-    res.status(404).json({ error: 'Not found' });
-  }
+  res.sendFile('react-build/index.html', { root: path.join(__dirname, 'public') });
 });
+
+// Global error handler (must be after all routes)
+app.use(errorHandler);
 
 // Run all pending migrations before accepting traffic.
 // Uses the same Pool as the rest of the app; runs once per migration.
@@ -4006,7 +4008,7 @@ const server = app.listen(port, () => {
   console.log(`[BuildOrbit] Server running on port ${port}`);
   console.log(`[BuildOrbit] Pipeline agents: PlannerAgent → BuilderAgent → OpsAgent → QAAgent`);
   console.log(`[BuildOrbit] Orchestrator initialized with agent registry + event bus + stage contracts`);
-  console.log(`[BuildOrbit] Artifact store: ./artifacts/{runId}/{stage}/{filename}`);
+  console.log(`[BuildOrbit] Artifact store: ${process.env.ARTIFACT_STORAGE || 'local'} backend`);
   console.log(`[BuildOrbit] A2A endpoint: POST /a2a/execute (Bearer auth, SSE stream, 6-phase)`);
   console.log(`[BuildOrbit] A2A descriptor: GET /a2a/descriptor`);
 
