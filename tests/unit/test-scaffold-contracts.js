@@ -304,6 +304,14 @@ test('full_product schema techStack includes dotenv', () => {
   assert(schema.techStack.includes('dotenv'), 'dotenv should be in techStack');
 });
 
+test('soft_expansion schema is registered explicitly', () => {
+  const { SCAFFOLD_SCHEMAS, getScaffoldSchema } = require('../../src/lib/scaffold-schemas');
+  assert(SCAFFOLD_SCHEMAS.soft_expansion, 'soft_expansion schema should exist');
+  const schema = getScaffoldSchema('soft_expansion');
+  assert(schema.entry === 'index.html', 'soft_expansion entry should be index.html');
+  assert(schema.server === true, 'soft_expansion should support a lightweight server');
+});
+
 test('Builder agent high-complexity scaffold includes required PRODUCT_SYSTEM files', async () => {
   const { BuilderAgent } = require('../../src/agents/builder-agent');
   const agent = new BuilderAgent();
@@ -583,6 +591,9 @@ test('_enforceManifest throws by default when manifest files are missing', () =>
   };
   const manifest = ['server.js', 'package.json', '.env.example', 'routes/api.js', 'db/database.js', 'index.html', 'styles.css', 'app.js'];
 
+  const originalLog = console.log;
+  const captured = [];
+  console.log = (msg) => captured.push(String(msg));
   try {
     agent._enforceManifest(files, manifest);
     throw new Error('should have thrown PARITY VIOLATION');
@@ -590,6 +601,9 @@ test('_enforceManifest throws by default when manifest files are missing', () =>
     assert(e.message.includes('SCAFFOLD MANIFEST PARITY VIOLATION'), 'should throw parity violation, got: ' + e.message);
     assert(e.message.includes('.env.example'), 'error should mention .env.example');
     assert(e.message.includes('db/database.js'), 'error should mention db/database.js');
+    assert(captured.some(line => line.includes('SCAFFOLD MANIFEST PARITY VIOLATION')), 'test harness should capture hard-gate log');
+  } finally {
+    console.log = originalLog;
   }
 });
 
@@ -608,12 +622,45 @@ test('_enforceManifest with throwOnMissing=false does NOT throw when manifest fi
   const manifest = ['server.js', 'package.json', '.env.example', 'routes/api.js', 'db/database.js', 'index.html', 'styles.css', 'app.js'];
 
   // Should NOT throw — returns partial file set for downstream gap-fill
-  const result = agent._enforceManifest(files, manifest, { throwOnMissing: false });
+  const originalLog = console.log;
+  console.log = () => {};
+  let result;
+  try {
+    result = agent._enforceManifest(files, manifest, { throwOnMissing: false });
+  } finally {
+    console.log = originalLog;
+  }
   assert(Object.keys(result).length === 6, `should return 6 files, got ${Object.keys(result).length}`);
   assert(!result['.env.example'], 'should not magically create .env.example');
   assert(!result['db/database.js'], 'should not magically create db/database.js');
   assert(result['server.js'], 'should keep server.js');
   assert(result['routes/api.js'], 'should keep routes/api.js');
+});
+
+test('_executeCode gap-fills missing scaffold manifest files before returning', async () => {
+  const { BuilderAgent } = require('../../src/agents/builder-agent');
+  const agent = new BuilderAgent();
+  const scaffold = {
+    files: ['server.js', 'package.json', '.env.example', 'routes/api.js', 'db/database.js', 'index.html', 'styles.css', 'app.js'],
+    constraints: { entry: 'index.html', hasServer: true, hasDb: true, techStack: ['express', 'better-sqlite3'] },
+  };
+
+  agent._simulatedCode = async () => ({
+    files: {
+      'server.js': 'const express = require("express");',
+      'package.json': '{}',
+      'routes/api.js': 'module.exports = function() {};',
+      'index.html': '<!doctype html><html><body><script src="app.js"></script></body></html>',
+      'styles.css': 'body {}',
+      'app.js': 'console.log("app");',
+    },
+    entryPoint: 'index.html',
+  });
+
+  const result = await agent._executeCode('Build a small app with persistence', {}, scaffold, () => {});
+  assert(result.files['.env.example'], 'gap fill should add .env.example');
+  assert(result.files['db/database.js'], 'gap fill should add db/database.js');
+  assert(Object.keys(result.files).length === scaffold.files.length, 'returned files should match manifest size');
 });
 
 test('_enforceManifest with throwOnMissing=false still strips non-manifest files', () => {

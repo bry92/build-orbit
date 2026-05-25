@@ -6,6 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+process.env.NODE_ENV = process.env.NODE_ENV || 'test';
+
 const unitDir = path.join(__dirname, '..', 'tests', 'unit');
 const files = fs.readdirSync(unitDir)
   .filter((f) => f.endsWith('.js') && f.startsWith('test-'))
@@ -24,6 +26,7 @@ for (const file of files) {
   const result = spawnSync(process.execPath, [filePath], {
     stdio: 'inherit',
     cwd: path.join(__dirname, '..'),
+    env: { ...process.env, NODE_ENV: process.env.NODE_ENV || 'test' },
   });
   if (result.status !== 0) failed++;
 }

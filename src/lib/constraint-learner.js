@@ -367,6 +367,9 @@ async function learn(runId, taskType, pool, emitFn = null) {
  * @returns {Promise<Array<{ constraint_key: string, weight: number, sample_count: number, frozen: boolean }>>}
  */
 async function getWeightsForTaskType(pool, taskType) {
+  if (process.env.NODE_ENV === 'test' && process.env.ENABLE_DB_LEARNER_IN_TESTS !== 'true') {
+    return [];
+  }
   if (!pool || !taskType) return [];
   try {
     const { rows } = await pool.query(

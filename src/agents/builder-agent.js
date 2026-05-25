@@ -1531,14 +1531,14 @@ Use the ===FILE: path=== ... ===END=== delimiter format.`;
       const stillMissing = [...canonicalManifest.keys()].filter(f => !generatedFiles.has(f));
 
       if (stillMissing.length > 0) {
-        console.warn(
-          `[BuilderAgent] Manifest gap fill: ${stillMissing.length} file(s) still missing after enforcement — synthesizing stubs: ${stillMissing.join(', ')}`
-        );
+        console.log(`[BuilderAgent] Manifest gap fill: synthesizing ${stillMissing.length} missing manifest file(s): ${stillMissing.join(', ')}`);
         for (const missingFile of stillMissing) {
           result.files[missingFile] = this._generateStubContent(missingFile, prompt, scaffoldManifest);
           console.log(`[BuilderAgent] Manifest gap fill: synthesized ${missingFile}`);
         }
       }
+
+      result.files = this._enforceManifest(result.files, scaffoldManifest);
     }
 
     // ── POST-GENERATION INTERACTIVITY SCAN ──────────────────────────────────
@@ -2475,7 +2475,7 @@ Output ONLY the raw ${isReactBuild ? 'JSX' : 'HTML'} content — no markdown fen
           `Generated: [${[...generatedFiles].join(', ')}]. Manifest: [${[...canonicalManifest].join(', ')}]. ` +
           `This indicates _enforceManifest was bypassed — the scaffold manifest requires ` +
           `${scaffoldManifest.length} files but only ${Object.keys(files).length} were generated.`;
-        console.error(errorMsg);
+        console.log(errorMsg);
         throw new Error(errorMsg);
       } else {
         console.log(
@@ -2507,7 +2507,7 @@ Output ONLY the raw ${isReactBuild ? 'JSX' : 'HTML'} content — no markdown fen
         `Generated: [${Object.keys(files).join(', ')}]. ` +
         `Manifest: [${scaffoldManifest.join(', ')}]. ` +
         `Pipeline cannot proceed with incomplete CODE output.`;
-      console.error(errorMsg);
+      console.log(errorMsg);
       throw new Error(errorMsg);
     }
 
@@ -4036,16 +4036,13 @@ CONTENT FIDELITY RULE: If the user asked for "${prompt.slice(0, 80)}${prompt.len
           `Scaffold manifest: [${[...manifestSet].join(', ')}]. ` +
           `CODE must generate a separate file for EACH entry in the SCAFFOLD manifest — ` +
           `do not collapse multiple files into a single file.`;
-        console.error(errorMsg);
+        console.log(errorMsg);
         throw new Error(errorMsg);
       } else {
         // Non-throwing mode: log missing files for downstream gap detection/fill.
         // Used at intermediate pipeline stages where Phase 3-6 continuation or
         // gap-fill stubs will handle the missing files.
-        console.warn(
-          `[BuilderAgent] Manifest enforcement: ${missing.length} file(s) still missing ` +
-          `(will be handled by continuation/gap-fill): [${missing.join(', ')}]`
-        );
+        console.log(`[BuilderAgent] Manifest enforcement: ${missing.length} file(s) pending gap-fill: [${missing.join(', ')}]`);
       }
     }
 

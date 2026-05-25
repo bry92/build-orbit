@@ -49,6 +49,22 @@ const SCAFFOLD_SCHEMAS = {
     },
   },
 
+  // ── Soft Expansion ────────────────────────────────────────────────────────
+  // Bridge state selected by Intent Gate when a prompt sits between classes.
+  // The concrete scaffold can still vary by authorized capabilities, but the
+  // schema is explicit so downstream validation never treats it as unknown.
+  soft_expansion: {
+    entry: 'index.html',
+    techStack: ['express', 'tailwindcss-cdn'],
+    server: true,
+    directories: ['routes'],
+    required_files: ['server.js', 'package.json'],
+    prohibited: {
+      entry: [],
+      techStack: ['mysql', 'mongodb'],
+    },
+  },
+
   // ── Full Product (PRODUCT_SYSTEM) ─────────────────────────────────────────
   // SaaS, platforms, multi-tenant dashboards — full backend + auth.
   // Entry is server.js (backend-first), everything enabled.
@@ -73,7 +89,7 @@ const SCAFFOLD_SCHEMAS = {
 /**
  * Get the scaffold schema for an intent class.
  *
- * @param {string} intentClass - 'static_surface' | 'light_app' | 'full_product' (PRODUCT_SYSTEM)
+ * @param {string} intentClass - 'static_surface' | 'light_app' | 'soft_expansion' | 'full_product' (PRODUCT_SYSTEM)
  * @returns {object} Schema template (deep copy)
  */
 function getScaffoldSchema(intentClass) {
