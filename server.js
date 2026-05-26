@@ -111,6 +111,21 @@ const { errorHandler } = require('./src/lib/error-handler');
 const helmet = require('helmet');
 
 const app = express();
+
+// Production shell must always serve BuildOrbit itself at the root. Generated
+// customer apps belong under explicit deployment/app URLs and must never shadow
+// the product frontend at "/".
+const frontendDistDir = path.join(__dirname, 'buildorbit-frontend', 'dist');
+const frontendIndexPath = path.join(frontendDistDir, 'index.html');
+if (fs.existsSync(frontendDistDir)) {
+  app.use(express.static(frontendDistDir, { index: false }));
+}
+app.get(['/', '/index.html'], (req, res) => {
+  if (!fs.existsSync(frontendIndexPath)) {
+    return res.status(503).send('BuildOrbit frontend build is missing. Run npm run build before starting the server.');
+  }
+  return res.sendFile(frontendIndexPath);
+});
 const port = process.env.PORT || 3000;
 
 app.use(helmet({ contentSecurityPolicy: false }));
