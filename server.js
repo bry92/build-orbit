@@ -3930,55 +3930,6 @@ app.get('*', (req, res) => {
 // Global error handler (must be after all routes)
 app.use(errorHandler);
 
-// Run all pending migrations before accepting traffic.
-// Uses the same Pool as the rest of the app; runs once per migration.
-{
-  const fs = require('fs');
-  const path = require('path');
-  const { Pool } = require('pg');
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-
-  (async () => {
-    const client = await pool.connect();
-    try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS _migrations (
-          id SERIAL PRIMARY KEY,
-          name VARCHAR(255) NOT NULL UNIQUE,
-          applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-      const { rows: applied } = await client.query('SELECT name FROM _migrations');
-      const appliedNames = new Set(applied.map(r => r.name));
-      const migrationsDir = path.join(__dirname, 'migrations');
-      const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.js')).sort();
-      for (const file of files) {
-        const m = require(path.join(migrationsDir, file));
-        const name = m.name || file.replace('.js', '');
-        if (appliedNames.has(name)) continue;
-        console.log(`[migrate] Applying: ${name}`);
-        await client.query('BEGIN');
-        try {
-          await m.up(client);
-          await client.query('INSERT INTO _migrations (name) VALUES ($1)', [name]);
-          await client.query('COMMIT');
-          console.log(`[migrate] Applied: ${name}`);
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw new Error(`Migration failed (${name}): ${err.message}`);
-        }
-      }
-      console.log('[migrate] All migrations applied.');
-    } finally {
-      client.release();
-      await pool.end();
-    }
-  })().catch(err => {
-    console.error('[migrate] Fatal:', err.message);
-    process.exit(1);
-  });
-}
-
 // ── Global Process Safety Net ──────────────────────────────────────────────
 // Log unhandled rejections and uncaught exceptions without crashing the server.
 // Unhandled rejections from fire-and-forget async calls (analytics, tracing, etc.)
