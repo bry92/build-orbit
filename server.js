@@ -115,10 +115,10 @@ const app = express();
 // Production shell must always serve BuildOrbit itself at the root. Generated
 // customer apps belong under explicit deployment/app URLs and must never shadow
 // the product frontend at "/".
-const frontendDistDir = path.join(__dirname, 'buildorbit-frontend', 'dist');
+const frontendDistDir = path.join(__dirname, 'public', 'react-build');
 const frontendIndexPath = path.join(frontendDistDir, 'index.html');
 if (fs.existsSync(frontendDistDir)) {
-  app.use(express.static(frontendDistDir, { index: false }));
+  app.use('/react-build', express.static(frontendDistDir, { index: false }));
 }
 app.get(['/', '/index.html'], (req, res) => {
   if (!fs.existsSync(frontendIndexPath)) {
